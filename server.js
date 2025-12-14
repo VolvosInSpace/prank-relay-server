@@ -85,7 +85,7 @@ wss.on('connection', (ws, req) => {
     }
 
     if (!rooms.has(roomCode)) {
-      rooms.set(roomCode, { sender: null, client: null });
+      rooms.set(roomCode, { sender: null, clients: [] });
     }
 
     const room = rooms.get(roomCode);
@@ -95,16 +95,19 @@ wss.on('connection', (ws, req) => {
     
     console.log('🎮 Sender joined room:', roomCode);
     
-    // If client is already waiting, notify sender
-    if (room.client) {
+    // Send current client count to sender
+    broadcastClientCount(roomCode);
+    
+    // If clients are already waiting, notify sender
+    if (room.clients.length > 0) {
       ws.send(JSON.stringify({ 
         type: 'target_acquired',
-        message: 'Target is online and ready for pranks! 🎯'
+        message: `${room.clients.length} target(s) online and ready for pranks! 🎯`
       }));
     } else {
       ws.send(JSON.stringify({ 
         type: 'waiting_for_target',
-        message: 'Waiting for target to come online...'
+        message: 'Waiting for targets to come online...'
       }));
     }
   }
@@ -118,15 +121,15 @@ wss.on('connection', (ws, req) => {
     }
 
     if (!rooms.has(roomCode)) {
-      rooms.set(roomCode, { sender: null, client: null });
+      rooms.set(roomCode, { sender: null, clients: [] });
     }
 
     const room = rooms.get(roomCode);
-    room.client = ws;
+    room.clients.push(ws);
     
-    clientInfo = { type: 'client', roomCode };
+    clientInfo = { type: 'client', roomCode, ws: ws };
     
-    console.log('🎯 Client joined room:', roomCode);
+    console.log(`🎯 Client joined room: ${roomCode} (${room.clients.length} total clients)`);
     
     // Notify client that connection is established
     ws.send(JSON.stringify({ 
@@ -134,11 +137,14 @@ wss.on('connection', (ws, req) => {
       message: 'Connected to relay server - stealth mode active'
     }));
 
+    // Update client count for sender
+    broadcastClientCount(roomCode);
+
     // If sender is waiting, notify them that target is acquired
     if (room.sender) {
       room.sender.send(JSON.stringify({ 
         type: 'target_acquired',
-        message: 'Target acquired! Ready to prank! 🎯'
+        message: `${room.clients.length} target(s) acquired! Ready to prank! 🎯`
       }));
     }
   }
@@ -150,22 +156,44 @@ wss.on('connection', (ws, req) => {
     }
 
     const room = rooms.get(clientInfo.roomCode);
-    if (!room || !room.client) {
-      ws.send(JSON.stringify({ type: 'error', message: 'No target connected' }));
+    if (!room || room.clients.length === 0) {
+      ws.send(JSON.stringify({ type: 'error', message: 'No targets connected' }));
       return;
     }
 
-    // Forward the prank message to the client
-    console.log('💥 Forwarding prank:', message.payload.type);
-    room.client.send(JSON.stringify({
-      type: 'prank_message',
-      payload: message.payload
-    }));
+    // Forward the prank message to ALL clients
+    console.log(`💥 Broadcasting prank: ${message.payload.type} to ${room.clients.length} clients`);
+    
+    let deliveredCount = 0;
+    room.clients.forEach((client, index) => {
+      try {
+        client.send(JSON.stringify({
+          type: 'prank_message',
+          payload: message.payload
+        }));
+        deliveredCount++;
+      } catch (error) {
+        console.log(`❌ Failed to send to client ${index + 1}:`, error.message);
+      }
+    });
 
     // Confirm delivery to sender
     ws.send(JSON.stringify({ 
       type: 'prank_delivered',
-      message: 'Prank delivered successfully! 💥'
+      message: `Prank delivered to ${deliveredCount}/${room.clients.length} targets! 💥`
+    }));
+  }
+
+  function broadcastClientCount(roomCode) {
+    const room = rooms.get(roomCode);
+    if (!room || !room.sender) return;
+    
+    const clientCount = room.clients.length;
+    console.log(`📊 Broadcasting client count: ${clientCount} to sender`);
+    
+    room.sender.send(JSON.stringify({
+      type: 'client_count',
+      count: clientCount
     }));
   }
 
@@ -177,28 +205,48 @@ wss.on('connection', (ws, req) => {
       room.sender = null;
       console.log('🎮 Sender disconnected from room:', info.roomCode);
       
-      // Notify client that sender is gone
-      if (room.client) {
-        room.client.send(JSON.stringify({ 
-          type: 'sender_disconnected',
-          message: 'Sender disconnected - entering standby mode'
-        }));
-      }
+      // Notify all clients that sender is gone
+      room.clients.forEach((client, index) => {
+        try {
+          client.send(JSON.stringify({ 
+            type: 'sender_disconnected',
+            message: 'Sender disconnected - entering standby mode'
+          }));
+        } catch (error) {
+          console.log(`❌ Failed to notify client ${index + 1} of sender disconnect`);
+        }
+      });
     } else if (info.type === 'client') {
-      room.client = null;
-      console.log('🎯 Client disconnected from room:', info.roomCode);
+      // Remove the specific client from the array
+      // Note: We need to store the ws reference in clientInfo to properly remove it
+      const clientIndex = room.clients.findIndex(client => client === clientInfo.ws);
+      if (clientIndex > -1) {
+        room.clients.splice(clientIndex, 1);
+      }
       
-      // Notify sender that target is gone
+      console.log(`🎯 Client disconnected from room: ${info.roomCode} (${room.clients.length} remaining)`);
+      
+      // Update client count for sender
+      broadcastClientCount(info.roomCode);
+      
+      // Notify sender about remaining targets
       if (room.sender) {
-        room.sender.send(JSON.stringify({ 
-          type: 'target_lost',
-          message: 'Target disconnected - waiting for reconnection...'
-        }));
+        if (room.clients.length > 0) {
+          room.sender.send(JSON.stringify({ 
+            type: 'target_update',
+            message: `${room.clients.length} target(s) remaining`
+          }));
+        } else {
+          room.sender.send(JSON.stringify({ 
+            type: 'target_lost',
+            message: 'All targets disconnected - waiting for reconnection...'
+          }));
+        }
       }
     }
 
     // Clean up empty rooms
-    if (!room.sender && !room.client) {
+    if (!room.sender && room.clients.length === 0) {
       rooms.delete(info.roomCode);
       console.log('🧹 Cleaned up empty room:', info.roomCode);
     }
