@@ -53,6 +53,10 @@ wss.on('connection', (ws, req) => {
           handlePrankMessage(ws, message);
           break;
         
+        case 'monitor_info':
+          handleMonitorInfo(ws, message);
+          break;
+        
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
           break;
@@ -182,6 +186,30 @@ wss.on('connection', (ws, req) => {
       type: 'prank_delivered',
       message: `Prank delivered to ${deliveredCount}/${room.clients.length} targets! 💥`
     }));
+  }
+
+  function handleMonitorInfo(ws, message) {
+    // This is a response from client to sender about monitor information
+    if (!clientInfo || clientInfo.type !== 'client') {
+      return; // Only clients should send monitor info
+    }
+
+    const room = rooms.get(clientInfo.roomCode);
+    if (!room || !room.sender) {
+      return; // No sender to forward to
+    }
+
+    console.log(`🖥️ Forwarding monitor info from client to sender`);
+    
+    // Forward monitor info to sender
+    try {
+      room.sender.send(JSON.stringify({
+        type: 'monitor_info',
+        monitors: message.monitors
+      }));
+    } catch (error) {
+      console.log(`❌ Failed to forward monitor info to sender:`, error.message);
+    }
   }
 
   function broadcastClientCount(roomCode) {
