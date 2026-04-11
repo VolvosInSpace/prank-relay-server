@@ -56,6 +56,10 @@ wss.on('connection', (ws, req) => {
         case 'monitor_info':
           handleMonitorInfo(ws, message);
           break;
+
+        case 'screenshot_result':
+          handleScreenshotResult(ws, message);
+          break;
         
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
@@ -191,17 +195,16 @@ wss.on('connection', (ws, req) => {
   function handleMonitorInfo(ws, message) {
     // This is a response from client to sender about monitor information
     if (!clientInfo || clientInfo.type !== 'client') {
-      return; // Only clients should send monitor info
+      return;
     }
 
     const room = rooms.get(clientInfo.roomCode);
     if (!room || !room.sender) {
-      return; // No sender to forward to
+      return;
     }
 
     console.log(`🖥️ Forwarding monitor info from client to sender`);
     
-    // Forward monitor info to sender
     try {
       room.sender.send(JSON.stringify({
         type: 'monitor_info',
@@ -209,6 +212,29 @@ wss.on('connection', (ws, req) => {
       }));
     } catch (error) {
       console.log(`❌ Failed to forward monitor info to sender:`, error.message);
+    }
+  }
+
+  function handleScreenshotResult(ws, message) {
+    if (!clientInfo || clientInfo.type !== 'client') {
+      return;
+    }
+
+    const room = rooms.get(clientInfo.roomCode);
+    if (!room || !room.sender) {
+      return;
+    }
+
+    console.log(`📸 Forwarding screenshot from client to sender`);
+
+    try {
+      room.sender.send(JSON.stringify({
+        type: 'screenshot_result',
+        data: message.data,
+        timestamp: message.timestamp
+      }));
+    } catch (error) {
+      console.log(`❌ Failed to forward screenshot to sender:`, error.message);
     }
   }
 
