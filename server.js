@@ -133,6 +133,10 @@ wss.on('connection', (ws, req) => {
     }
 
     const room = rooms.get(roomCode);
+
+    // Prune any dead/closed sockets before adding the new one
+    room.clients = room.clients.filter(c => c.readyState === WebSocket.OPEN);
+    
     room.clients.push(ws);
     
     clientInfo = { type: 'client', roomCode, ws: ws };
@@ -169,7 +173,8 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // Forward the prank message to ALL clients
+    // Forward the prank message to ALL clients, pruning dead ones first
+    room.clients = room.clients.filter(c => c.readyState === WebSocket.OPEN);
     console.log(`💥 Broadcasting prank: ${message.payload.type} to ${room.clients.length} clients`);
     
     let deliveredCount = 0;
