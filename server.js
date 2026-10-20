@@ -31,14 +31,16 @@ app.get('/', (req, res) => {
 
 // WebSocket connection handler
 wss.on('connection', (ws, req) => {
-  console.log('📡 New connection from:', req.socket.remoteAddress);
+  const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
+  ws.ip = ip;
+  console.log('📡 New connection from:', ip);
   
   let clientInfo = null;
 
   ws.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
-      console.log('📨 Received message:', message.type, 'from', req.socket.remoteAddress);
+      console.log('📨 Received message:', message.type, 'from', ws.deviceLabel || ws.ip || req.socket.remoteAddress);
 
       switch (message.type) {
         case 'sender_join':
@@ -74,7 +76,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
-    console.log('📴 Connection closed from:', req.socket.remoteAddress);
+    console.log('📴 Connection closed from:', ws.deviceLabel || ws.ip || req.socket.remoteAddress);
     if (clientInfo) {
       handleDisconnection(clientInfo);
     }
@@ -121,7 +123,15 @@ wss.on('connection', (ws, req) => {
   }
 
   function handleClientJoin(ws, message) {
-    const { roomCode } = message;
+    const { roomCode, clientId, deviceType, deviceName, platform } = message;
+    
+    // Build descriptive device label (e.g. "Android (Samsung Galaxy S22) [id: 7a8b9c1d]")
+    const shortId = clientId ? clientId.substring(0, 8) : 'unknown';
+    const typeLabel = deviceType || (platform ? `Desktop (${platform})` : 'Client');
+    const nameLabel = deviceName ? ` (${deviceName})` : '';
+    const deviceLabel = `${typeLabel}${nameLabel} [id: ${shortId}]`;
+    ws.deviceLabel = deviceLabel;
+    ws.deviceInfo = { deviceType, deviceName, platform, clientId };
     
     if (roomCode !== PRANK_ROOM_CODE) {
       ws.send(JSON.stringify({ type: 'error', message: 'Invalid room code' }));
@@ -134,14 +144,33 @@ wss.on('connection', (ws, req) => {
 
     const room = rooms.get(roomCode);
 
-    // Prune any dead/closed sockets before adding the new one
-    room.clients = room.clients.filter(c => c.readyState === WebSocket.OPEN);
-    
+    // Save clientId on ws object
+    ws.clientId = clientId || null;
+    ws.roomCode = roomCode;
+
+    // Prune dead sockets and any old socket with the same clientId or same instance
+    const remainingClients = [];
+    for (const c of room.clients) {
+      if (c === ws) {
+        continue;
+      }
+      if (c.readyState !== WebSocket.OPEN) {
+        try { c.terminate(); } catch (_) {}
+        continue;
+      }
+      if (clientId && c.clientId === clientId) {
+        console.log(`🔄 Client ${clientId} reconnected. Terminating previous stale connection.`);
+        try { c.terminate(); } catch (_) {}
+        continue;
+      }
+      remainingClients.push(c);
+    }
+    room.clients = remainingClients;
     room.clients.push(ws);
     
-    clientInfo = { type: 'client', roomCode, ws: ws };
+    clientInfo = { type: 'client', roomCode, clientId, deviceLabel, ws: ws };
     
-    console.log(`🎯 Client joined room: ${roomCode} (${room.clients.length} total clients)`);
+    console.log(`🎯 Client joined room: ${roomCode} -> ${deviceLabel} (${room.clients.length} total clients online)`);
     
     // Notify client that connection is established
     ws.send(JSON.stringify({ 
@@ -173,8 +202,25 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // Forward the prank message to ALL clients, pruning dead ones first
-    room.clients = room.clients.filter(c => c.readyState === WebSocket.OPEN);
+    // Forward the prank message to ALL clients, pruning dead ones and deduplicating by clientId
+    const seenClients = new Set();
+    const activeClients = [];
+    for (const c of room.clients) {
+      if (c.readyState !== WebSocket.OPEN) {
+        try { c.terminate(); } catch (_) {}
+        continue;
+      }
+      if (c.clientId) {
+        if (seenClients.has(c.clientId)) {
+          console.log(`⚠️ Dropping duplicate socket for clientId: ${c.clientId}`);
+          continue;
+        }
+        seenClients.add(c.clientId);
+      }
+      activeClients.push(c);
+    }
+    room.clients = activeClients;
+
     console.log(`💥 Broadcasting prank: ${message.payload.type} to ${room.clients.length} clients`);
     
     let deliveredCount = 0;
@@ -250,9 +296,11 @@ wss.on('connection', (ws, req) => {
     const clientCount = room.clients.length;
     console.log(`📊 Broadcasting client count: ${clientCount} to sender`);
     
+    const devices = room.clients.map(c => c.deviceLabel || c.clientId || 'Unknown Device');
     room.sender.send(JSON.stringify({
       type: 'client_count',
-      count: clientCount
+      count: clientCount,
+      devices: devices
     }));
   }
 
@@ -276,14 +324,10 @@ wss.on('connection', (ws, req) => {
         }
       });
     } else if (info.type === 'client') {
-      // Remove the specific client from the array
-      // Note: We need to store the ws reference in clientInfo to properly remove it
-      const clientIndex = room.clients.findIndex(client => client === clientInfo.ws);
-      if (clientIndex > -1) {
-        room.clients.splice(clientIndex, 1);
-      }
+      // Remove the specific client from the array and clean up dead sockets
+      room.clients = room.clients.filter(client => client !== info.ws && client.readyState === WebSocket.OPEN);
       
-      console.log(`🎯 Client disconnected from room: ${info.roomCode} (${room.clients.length} remaining)`);
+      console.log(`🎯 Client disconnected from room: ${info.roomCode} -> ${info.deviceLabel || info.clientId || 'unknown'} (${room.clients.length} remaining)`);
       
       // Update client count for sender
       broadcastClientCount(info.roomCode);
